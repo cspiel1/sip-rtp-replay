@@ -75,6 +75,10 @@ static void rtp_pkt_destructor(void *data)
  * Supports link types:
  *   DLT_EN10MB (1)   – Ethernet
  *   DLT_LINUX_SLL (113) – Linux cooked capture
+ *
+ * Only packets belonging to the first RTP SSRC encountered are kept.
+ * This correctly handles captures that contain multiple streams
+ * (e.g. both call legs, or audio + video).
  */
 static int load_pcap(struct app *app, const char *path)
 {
@@ -84,6 +88,8 @@ static int load_pcap(struct app *app, const char *path)
 	const uint8_t *data;
 	int dlt, rc;
 	unsigned count = 0;
+	uint32_t ssrc_filter = 0;
+	bool ssrc_set = false;
 
 	pc = pcap_open_offline(path, errbuf);
 	if (!pc) {
@@ -157,6 +163,16 @@ static int load_pcap(struct app *app, const char *path)
 		struct rtp_header hdr;
 		if (rtp_hdr_decode(&hdr, &mb) != 0)
 			continue;
+
+		/* Lock onto the first SSRC seen; drop all others */
+		if (!ssrc_set) {
+			ssrc_filter = hdr.ssrc;
+			ssrc_set    = true;
+			(void)re_printf("load_pcap: selected SSRC 0x%08x"
+					" (PT %u)\n", ssrc_filter, hdr.pt);
+		} else if (hdr.ssrc != ssrc_filter) {
+			continue;
+		}
 
 		size_t payload_len = mbuf_get_left(&mb);
 
