@@ -414,6 +414,18 @@ static void conn_handler(const struct sip_msg *msg, void *arg)
 		return;
 	}
 
+	/* Reject all non-audio media lines (e.g. video) in the answer */
+	const struct list *medial = sdp_session_medial(app->sdp, true);
+	struct le *le;
+	LIST_FOREACH(medial, le) {
+		struct sdp_media *m = list_ledata(le);
+		if (strcmp(sdp_media_name(m), sdp_media_audio) != 0) {
+			(void)re_printf("conn: disabling media '%s'\n",
+					sdp_media_name(m));
+			sdp_media_set_disabled(m, true);
+		}
+	}
+
 	/* Open local RTP socket */
 	err = rtp_listen(&app->rtp, IPPROTO_UDP, &lmedia,
 			 10000, 20000, false,
