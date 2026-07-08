@@ -354,12 +354,17 @@ static int answer_handler(const struct sip_msg *msg, void *arg)
 static void close_handler(int err, const struct sip_msg *msg, void *arg)
 {
 	struct app *app = arg;
-	(void)msg;
 
-	(void)re_printf("call closed (%m)\n", err);
+	if (err)
+		(void)re_printf("call error: %m\n", err);
+	else if (msg && msg->req)
+		(void)re_printf("BYE received from peer\n");
+	else
+		(void)re_printf("call closed\n");
+
 	app->active = false;
 	app->cur    = NULL;
-	tmr_cancel(&app->tmr);
+	tmr_cancel(&app->tmr);   /* cancel send_bye or send_next_packet */
 	app->sess = mem_deref(app->sess);
 	app->rtp  = mem_deref(app->rtp);
 	(void)re_printf("ready – waiting for next call\n");
