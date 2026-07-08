@@ -14,19 +14,22 @@
 set -e
 
 REVERSE=0
+PRINT_ONLY=0
 
 # Parse options
 while [ $# -gt 0 ]; do
     case "$1" in
         -r|--reverse) REVERSE=1; shift ;;
+        -p)           PRINT_ONLY=1; shift ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
         *) break ;;
     esac
 done
 
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 [-r|--reverse] <pcap-file> [output-file]" >&2
+    echo "Usage: $0 [-r|--reverse] [-p] <pcap-file> [output-file]" >&2
     echo "  -r, --reverse  filter callee RTP (default: caller)" >&2
+    echo "  -p             print tshark command only, do not execute" >&2
     exit 1
 fi
 
@@ -73,9 +76,14 @@ else
 fi
 
 if [ -n "$OUTPUT_FILE" ]; then
-    echo "Writing filtered packets to $OUTPUT_FILE"
-    tshark -r "$PCAP" -Y "sip.CSeq.method == \"INVITE\" or ($RTP_FILTER)" \
-        -w "$OUTPUT_FILE"
+    CMD="tshark -r \"$PCAP\" -Y \"sip.CSeq.method == \\\"INVITE\\\" or ($RTP_FILTER)\" -w \"$OUTPUT_FILE\""
 else
-    tshark -r "$PCAP" -Y "sip.CSeq.method == \"INVITE\" or ($RTP_FILTER)"
+    CMD="tshark -r \"$PCAP\" -Y \"sip.CSeq.method == \\\"INVITE\\\" or ($RTP_FILTER)\""
+fi
+
+if [ "$PRINT_ONLY" = "1" ]; then
+    echo "$CMD"
+else
+    [ -n "$OUTPUT_FILE" ] && echo "Writing filtered packets to $OUTPUT_FILE"
+    eval "$CMD"
 fi
