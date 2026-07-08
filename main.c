@@ -145,8 +145,16 @@ static int load_pcap(struct app *app, const char *path)
 		/* --- UDP header ------------------------------------------- */
 		if (remaining < sizeof(struct udphdr))
 			continue;
+		const struct udphdr *udph = (const struct udphdr *)p;
+		uint16_t udp_src = ntohs(udph->uh_sport);
+		uint16_t udp_dst = ntohs(udph->uh_dport);
 		p         += sizeof(struct udphdr);
 		remaining -= sizeof(struct udphdr);
+
+		/* Skip SIP ports */
+		if (udp_src == 5060 || udp_dst == 5060 ||
+		    udp_src == 5061 || udp_dst == 5061)
+			continue;
 
 		/* --- RTP header ------------------------------------------- */
 		if (remaining < RTP_HEADER_SIZE)
@@ -162,6 +170,8 @@ static int load_pcap(struct app *app, const char *path)
 
 		struct rtp_header hdr;
 		if (rtp_hdr_decode(&hdr, &mb) != 0)
+			continue;
+		if (hdr.ver != RTP_VERSION)
 			continue;
 
 		/* Lock onto the first SSRC seen; drop all others */
