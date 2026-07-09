@@ -2,7 +2,15 @@
  * sip-rtp-replay -- answer an incoming SIP call and replay an RTP stream
  *                   from a pcap file with the original inter-packet timing.
  *
- * Usage:  sip-rtp-replay <pcap-file>  [sip-port]
+ * Usage:  sip-rtp-replay [options] <pcap-file> [sip-port]
+ *
+ * Options:
+ *   -s, --skew   Compensate stream skew while preserving jitter.
+ *                A per-packet EWMA tracks the slowly-varying drift between
+ *                the pcap capture timestamps and the RTP-clock-implied rate.
+ *                Each replay interval is re-centred on the RTP nominal value;
+ *                the residual deviation from the running mean (= jitter) is
+ *                left intact.
  *
  * The program:
  *   - listens for an incoming SIP INVITE
@@ -22,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <getopt.h>
+#include <math.h>
 
 /* Linux Cooked Capture v1 header length */
 #define LINUX_SLL_LEN  16
@@ -54,6 +64,10 @@ struct app {
 
 	struct sa            rtp_dst;/**< remote RTP destination from SDP   */
 	bool                 active; /**< call is established                */
+
+	bool                 skew;           /**< compensate stream skew       */
+	uint32_t             clock_rate;    /**< RTP clock rate [Hz]          */
+	double               skew_smooth_us;/**< EWMA of pcap delta [us]      */
 };
 
 static struct app g_app;
@@ -226,6 +240,105 @@ static int load_pcap(struct app *app, const char *path)
 }
 
 /* -------------------------------------------------------------------------
+ * Skew compensation
+ * ---------------------------------------------------------------------- */
+
+/** Return the RTP clock rate for well-known static payload types, or 0. */
+static uint32_t rtp_clockrate_from_pt(uint8_t pt)
+{
+	switch (pt) {
+	case  0: /* PCMU  */
+	case  3: /* GSM   */
+	case  4: /* G.723 */
+	case  5: /* DVI4 8k */
+	case  8: /* PCMA  */
+	case  9: /* G.722 */
+	case 15: /* G.728 */
+	case 18: /* G.729 */
+		return 8000;
+	case  6: /* DVI4 16k */
+		return 16000;
+	default:
+		return 0; /* dynamic PT – will estimate from data */
+	}
+}
+
+/**
+ * Initialise skew-compensation state.
+ *
+ * Determines the RTP clock rate and bootstraps the EWMA smoother
+ * (skew_smooth_us) from the overall mean pcap inter-packet delay so that
+ * compensation is already well-calibrated at the first packet.
+ *
+ * During replay schedule_next() updates skew_smooth_us with each step:
+ *
+ *   skew_smooth += SKEW_ALPHA * (pcap_delta - skew_smooth)
+ *
+ * The compensated delay for that step is then:
+ *
+ *   rtp_nominal + (pcap_delta - skew_smooth)
+ *
+ * i.e. re-centre around the RTP-clock rate while preserving the
+ * per-packet deviation from the running mean (= jitter).
+ */
+
+/** Smoothing factor for the skew EWMA.  0.05 → ~20-packet time constant. */
+#define SKEW_ALPHA 0.05
+
+static void init_skew(struct app *app)
+{
+	uint32_t n = list_count(&app->pktl);
+	if (n < 2)
+		return;
+
+	const struct rtp_pkt *first = list_ledata(list_head(&app->pktl));
+	const struct rtp_pkt *last  = list_ledata(list_tail(&app->pktl));
+
+	uint64_t pcap_span_us = last->ts_us - first->ts_us;
+	if (pcap_span_us == 0) {
+		(void)re_fprintf(stderr, "skew: pcap span is zero, "
+				 "skew compensation disabled\n");
+		app->skew = false;
+		return;
+	}
+
+	/* Determine RTP clock rate */
+	app->clock_rate = rtp_clockrate_from_pt(first->hdr.pt);
+	if (!app->clock_rate) {
+		/* Estimate from data: ticks/s ≈ rtp_span / pcap_span_s */
+		uint32_t rtp_span_ticks = last->hdr.ts - first->hdr.ts;
+		double rate_est = (double)rtp_span_ticks
+				  / (pcap_span_us / 1e6);
+		static const uint32_t rates[] =
+			{8000, 16000, 32000, 44100, 48000, 90000};
+		app->clock_rate = rates[0];
+		double best_diff = fabs(rate_est - rates[0]);
+		for (size_t i = 1; i < 6; i++) {
+			double d = fabs(rate_est - rates[i]);
+			if (d < best_diff) {
+				best_diff = d;
+				app->clock_rate = rates[i];
+			}
+		}
+		(void)re_printf("skew: PT %u unknown, estimated clock rate "
+				"%u Hz (raw estimate %.0f Hz)\n",
+				first->hdr.pt, app->clock_rate, rate_est);
+	}
+
+	/* Bootstrap EWMA from overall mean pcap delta */
+	app->skew_smooth_us = (double)pcap_span_us / (n - 1);
+
+	uint32_t rtp_span_ticks = last->hdr.ts - first->hdr.ts;
+	double nominal_us = (double)rtp_span_ticks / app->clock_rate * 1e6
+			    / (n - 1);
+
+	(void)re_printf("skew: PT=%u clock=%u Hz  "
+			"nominal=%.1f us/pkt  mean_pcap=%.1f us/pkt\n",
+			first->hdr.pt, app->clock_rate,
+			nominal_us, app->skew_smooth_us);
+}
+
+/* -------------------------------------------------------------------------
  * RTP replay
  * ---------------------------------------------------------------------- */
 
@@ -253,9 +366,26 @@ static void schedule_next(struct app *app)
 
 	app->cur = next;
 
-	uint64_t delta_us = (p1->ts_us >= p0->ts_us)
-			    ? (p1->ts_us - p0->ts_us) : 0;
-	uint64_t delay_ms = delta_us / 1000;
+	int64_t delta_us = (p1->ts_us >= p0->ts_us)
+			   ? (int64_t)(p1->ts_us - p0->ts_us) : 0;
+
+	if (app->skew) {
+		/* RTP-timestamp-implied nominal interval for this step */
+		double rtp_nom_us = (double)(uint32_t)(p1->hdr.ts - p0->hdr.ts)
+				    / app->clock_rate * 1e6;
+
+		/* Update EWMA – tracks the slowly-varying skew component */
+		app->skew_smooth_us += SKEW_ALPHA
+				       * ((double)delta_us - app->skew_smooth_us);
+
+		/* Re-centre on RTP nominal; residual (jitter) is preserved */
+		double comp = rtp_nom_us + ((double)delta_us - app->skew_smooth_us);
+		delta_us = (int64_t)comp;
+		if (delta_us < 1000)
+			delta_us = 1000; /* floor at 1 ms */
+	}
+
+	uint64_t delay_ms = (uint64_t)delta_us / 1000;
 	if (delay_ms == 0)
 		delay_ms = 1;
 
@@ -507,16 +637,42 @@ static void app_destroy(struct app *app)
 		mem_deref(list_ledata(le));
 }
 
+static void usage(const char *prog)
+{
+	(void)re_fprintf(stderr,
+		"Usage: %s [options] <pcap-file> [sip-port]\n"
+		"Options:\n"
+		"  -s, --skew   Compensate stream skew, preserve jitter\n"
+		"  -h, --help   Show this help\n",
+		prog);
+}
+
 int main(int argc, char *argv[])
 {
-	if (argc < 2) {
-		(void)re_fprintf(stderr,
-			"Usage: %s <pcap-file> [sip-port]\n", argv[0]);
+	static const struct option lopts[] = {
+		{"skew", no_argument, NULL, 's'},
+		{"help", no_argument, NULL, 'h'},
+		{NULL,   0,           NULL,  0 }
+	};
+	int opt;
+	bool skew = false;
+
+	while ((opt = getopt_long(argc, argv, "sh", lopts, NULL)) != -1) {
+		switch (opt) {
+		case 's': skew = true; break;
+		case 'h': usage(argv[0]); return 0;
+		default:  usage(argv[0]); return 1;
+		}
+	}
+
+	if (argc - optind < 1) {
+		usage(argv[0]);
 		return 1;
 	}
 
-	const char *pcap_path = argv[1];
-	uint16_t sip_port = (argc >= 3) ? (uint16_t)atoi(argv[2]) : 5060;
+	const char *pcap_path = argv[optind];
+	uint16_t sip_port = (argc - optind >= 2)
+			    ? (uint16_t)atoi(argv[optind + 1]) : 5060;
 
 	int err = libre_init();
 	if (err) {
@@ -527,11 +683,15 @@ int main(int argc, char *argv[])
 	memset(&g_app, 0, sizeof(g_app));
 	list_init(&g_app.pktl);
 	tmr_init(&g_app.tmr);
+	g_app.skew = skew;
 
 	/* Load pcap */
 	err = load_pcap(&g_app, pcap_path);
 	if (err)
 		goto out;
+
+	if (g_app.skew)
+		init_skew(&g_app);
 
 	/* Allocate SIP stack */
 	err = sip_alloc(&g_app.sip, NULL, 32, 32, 32,
