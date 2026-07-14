@@ -4,33 +4,29 @@
 # Usage: filter.sh [options] <pcap-file> [output-file]
 #
 # Options:
-#   -h, --help         show this help and exit
-#   -l, --list         list RTP streams (ip.src, ip.dst) and exit
-#   -s, --source <ip>  filter RTP by source IP
-#   -d, --dest   <ip>  filter RTP by destination IP
+#   -h, --help           show this help and exit
+#   -l, --list           list RTP streams and exit
+#   -s, --ssrc <ssrc>    filter RTP by SSRC (e.g. 0x7FC562C4)
 
 set -e
 
 LIST=0
-SRC_IP=""
-DST_IP=""
+SSRC=""
 PCAP=""
 OUTPUT_FILE=""
 
 usage() {
     echo "Usage: $0 [options] <pcap-file> [output-file]"
-    echo "  -h, --help         show this help and exit"
-    echo "  -l, --list         list RTP streams and exit"
-    echo "  -s, --source <ip>  filter RTP by source IP"
-    echo "  -d, --dest   <ip>  filter RTP by destination IP"
+    echo "  -h, --help           show this help and exit"
+    echo "  -l, --list           list RTP streams and exit"
+    echo "  -s, --ssrc <ssrc>    filter RTP by SSRC (e.g. 0x7FC562C4)"
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help)         usage; exit 0 ;;
-        -l|--list)         LIST=1; shift ;;
-        -s|--source) SRC_IP="$2"; shift 2 ;;
-        -d|--dest)   DST_IP="$2"; shift 2 ;;
+        -h|--help)       usage; exit 0 ;;
+        -l|--list)       LIST=1; shift ;;
+        -s|--ssrc) SSRC="$2"; shift 2 ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
         *)
             if [ -z "$PCAP" ]; then
@@ -54,8 +50,7 @@ fi
 
 # Build RTP filter
 RTP_FILTER="rtp"
-[ -n "$SRC_IP" ] && RTP_FILTER="$RTP_FILTER and ip.src == $SRC_IP"
-[ -n "$DST_IP" ] && RTP_FILTER="$RTP_FILTER and ip.dst == $DST_IP"
+[ -n "$SSRC" ] && RTP_FILTER="$RTP_FILTER and rtp.ssrc == $SSRC"
 
 DISPLAY_FILTER="sip.CSeq.method == \"INVITE\" or ($RTP_FILTER)"
 
