@@ -13,6 +13,8 @@ set -e
 LIST=0
 SRC_IP=""
 DST_IP=""
+PCAP=""
+OUTPUT_FILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -20,20 +22,23 @@ while [ $# -gt 0 ]; do
         -s|--source) SRC_IP="$2"; shift 2 ;;
         -d|--dest)   DST_IP="$2"; shift 2 ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
-        *) break ;;
+        *)
+            if [ -z "$PCAP" ]; then
+                PCAP="$1"
+            elif [ -z "$OUTPUT_FILE" ]; then
+                OUTPUT_FILE="$1"
+            fi
+            shift ;;
     esac
 done
 
-if [ $# -lt 1 ]; then
+if [ -z "$PCAP" ]; then
     echo "Usage: $0 [options] <pcap-file> [output-file]" >&2
     echo "  -l, --list         list RTP streams and exit" >&2
     echo "  -s, --source <ip>  filter RTP by source IP" >&2
     echo "  -d, --dest   <ip>  filter RTP by destination IP" >&2
     exit 1
 fi
-
-PCAP="$1"
-OUTPUT_FILE="${2:-}"
 
 if [ "$LIST" = "1" ]; then
     tshark -r "$PCAP" -q -z rtp,streams 2>/dev/null
