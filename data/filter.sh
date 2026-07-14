@@ -4,6 +4,7 @@
 # Usage: filter.sh [options] <pcap-file> [output-file]
 #
 # Options:
+#   -h, --help         show this help and exit
 #   -l, --list         list RTP streams (ip.src, ip.dst) and exit
 #   -s, --source <ip>  filter RTP by source IP
 #   -d, --dest   <ip>  filter RTP by destination IP
@@ -16,8 +17,17 @@ DST_IP=""
 PCAP=""
 OUTPUT_FILE=""
 
+usage() {
+    echo "Usage: $0 [options] <pcap-file> [output-file]"
+    echo "  -h, --help         show this help and exit"
+    echo "  -l, --list         list RTP streams and exit"
+    echo "  -s, --source <ip>  filter RTP by source IP"
+    echo "  -d, --dest   <ip>  filter RTP by destination IP"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
+        -h|--help)         usage; exit 0 ;;
         -l|--list)         LIST=1; shift ;;
         -s|--source) SRC_IP="$2"; shift 2 ;;
         -d|--dest)   DST_IP="$2"; shift 2 ;;
@@ -33,10 +43,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$PCAP" ]; then
-    echo "Usage: $0 [options] <pcap-file> [output-file]" >&2
-    echo "  -l, --list         list RTP streams and exit" >&2
-    echo "  -s, --source <ip>  filter RTP by source IP" >&2
-    echo "  -d, --dest   <ip>  filter RTP by destination IP" >&2
+    usage >&2
     exit 1
 fi
 
